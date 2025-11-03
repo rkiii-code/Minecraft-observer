@@ -1,2 +1,14 @@
 # Minecraft-observer
-Under development This is the source code for a Discord bot I'm building as a hobby.
+
+## 概要
+
+開発中のDiscordBotです。趣味用です。\\
+Push忘れがちなのでこまめにするようにします。
+
+## やること
+
+- [ ] ログの通知をDiscordにおくりたい
+- [ ] サーバーの起動をDiscordからできるようにしたい
+- [ ] サーバーが落ちた時に自動で復帰してほしい
+- [ ] Discordからのメッセージ送信
+- [ ] プレイヤーごとの時間を記録する
