@@ -1,15 +1,17 @@
 package main
 
 import (
+	"bufio"
+	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
+	"regexp"
 	"syscall"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
-
-	// go.mod の module に合わせて import を調整してください
-	// 例: module github.com/rkiii-code/Minecraft-observer
 	"github.com/rkiii-code/Minecraft-observer/bot/commands"
 )
 
@@ -18,21 +20,25 @@ func main() {
 	if token == "" {
 		log.Fatal("DISCORD_BOT_TOKEN is empty")
 	}
-	guildID := os.Getenv("DISCORD_GUILD_ID") // 開発中は入れると即反映。空ならグローバル登録
+	guildID := os.Getenv("DISCORD_GUILD_ID")
+	channelID := os.Getenv("DISCORD_CHANNEL_ID")
+	if channelID == "" {
+		log.Println("[WARN] DISCORD_CHANNEL_ID is empty; log notifications will be disabled")
+	}
+	container := os.Getenv("MC_CONTAINER_NAME")
+	if container == "" {
+		container = "mc_bedrock"
+	}
 
 	dg, err := discordgo.New("Bot " + token)
 	if err != nil {
 		log.Fatalf("new session: %v", err)
 	}
 
-	// コマンド登録（ファイルを増やしたらここに1行足すだけ）
+	// スラッシュコマンド
 	commands.Register(commands.NewSay())
 	commands.Register(commands.NewPing())
-
-	// 共通ディスパッチをハンドラに
 	dg.AddHandler(commands.DispatchInteraction)
-
-	// スラッシュコマンドには Intent は不要だが、将来のために最小限
 	dg.Identify.Intents = 0
 
 	if err := dg.Open(); err != nil {
@@ -40,7 +46,6 @@ func main() {
 	}
 	defer dg.Close()
 
-	// アプリIDはセッションから取得（Client ID と同じ）
 	appID := dg.State.User.ID
 	log.Printf("appID=%s", appID)
 
@@ -53,12 +58,69 @@ func main() {
 		log.Printf("created command: %s (%s)", cmd.Name, cmd.ID)
 	}
 
+	// === ここから追加：Dockerログ監視を開始 ===
+	if channelID != "" {
+		go func() {
+			// 監視したいパターンはここで増やせる
+			re := regexp.MustCompile(`Player connected`)
+			// 失敗しても再試行するループ
+			for {
+				if err := streamDockerLogsAndNotify(dg, container, channelID, re); err != nil {
+					log.Printf("[logwatch] error: %v (retry in 3s)", err)
+					time.Sleep(3 * time.Second)
+				}
+			}
+		}()
+	}
+	// === 追加ここまで ===
+
 	log.Println("Bot is running. Press Ctrl+C to exit.")
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	<-stop
+}
 
-	// （任意）終了時にコマンド削除したい場合
-	// cmds, _ := dg.ApplicationCommands(appID, guildID)
-	// for _, c := range cmds { _ = dg.ApplicationCommandDelete(appID, guildID, c.ID) }
+// docker logs -f を実行し、正規表現にヒットした行をDiscordへ送る
+func streamDockerLogsAndNotify(dg *discordgo.Session, container, channelID string, re *regexp.Regexp) error {
+	// --since=5m で再起動時のドバッと通知をある程度抑制
+	cmd := exec.Command("docker", "logs", "-f", "--since=5m", container)
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("StdoutPipe: %w", err)
+	}
+	stderr, _ := cmd.StderrPipe()
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start docker logs: %w", err)
+	}
+
+	sc := bufio.NewScanner(stdout)
+	errSc := bufio.NewScanner(stderr)
+	go func() {
+		for errSc.Scan() {
+			log.Printf("[docker-err] %s", errSc.Text())
+		}
+	}()
+
+	log.Printf("[logwatch] following container=%s", container)
+	for sc.Scan() {
+		line := sc.Text()
+		if re.MatchString(line) {
+			msg := fmt.Sprintf("**[MC]** %s  %s", time.Now().Format("2006-01-02 15:04:05"), line)
+			// ここで @here にしたいなら msg = "@here " + msg （サーバ側権限に依存）
+			if _, err := dg.ChannelMessageSend(channelID, msg); err != nil {
+				log.Printf("[logwatch] send failed: %v", err)
+			} else {
+				log.Printf("[logwatch] posted: %s", line)
+			}
+		}
+	}
+	// scannerエラー
+	if err := sc.Err(); err != nil {
+		_ = cmd.Process.Kill()
+		return fmt.Errorf("scanner: %w", err)
+	}
+	// docker logs プロセス終了（コンテナ停止など）→ 呼び出し元でリトライ
+	return fmt.Errorf("docker logs exited")
 }
