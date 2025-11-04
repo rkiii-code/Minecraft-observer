@@ -1,4 +1,4 @@
-module example.com/discord-bot
+module github.com/rkiii-code/Minecraft-observer
 
 go 1.24.3
 

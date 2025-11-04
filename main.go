@@ -1,4 +1,3 @@
-// main.go
 package main
 
 import (
@@ -8,85 +7,58 @@ import (
 	"syscall"
 
 	"github.com/bwmarrin/discordgo"
-)
 
-var (
-	appCommands = []*discordgo.ApplicationCommand{
-		{
-			Name:        "say",
-			Description: "Botに発言させる",
-			Options: []*discordgo.ApplicationCommandOption{
-				{
-					Type:        discordgo.ApplicationCommandOptionString,
-					Name:        "text",
-					Description: "発言内容",
-					Required:    true,
-				},
-			},
-		},
-	}
+	// go.mod の module に合わせて import を調整してください
+	// 例: module github.com/rkiii-code/Minecraft-observer
+	"github.com/rkiii-code/Minecraft-observer/bot/commands"
 )
 
 func main() {
 	token := os.Getenv("DISCORD_BOT_TOKEN")
-	guildID := os.Getenv("DISCORD_GUILD_ID")
-	if token == "" || guildID == "" {
-		log.Fatal("DISCORD_BOT_TOKEN と DISCORD_GUILD_ID を設定してください")
+	if token == "" {
+		log.Fatal("DISCORD_BOT_TOKEN is empty")
 	}
+	guildID := os.Getenv("DISCORD_GUILD_ID") // 開発中は入れると即反映。空ならグローバル登録
 
 	dg, err := discordgo.New("Bot " + token)
 	if err != nil {
-		log.Fatal("New:", err)
+		log.Fatalf("new session: %v", err)
 	}
-	dg.Identify.Intents = discordgo.IntentsGuilds
 
-	// コマンドのハンドラ
-	dg.AddHandler(func(s *discordgo.Session, i *discordgo.InteractionCreate) {
-		if i.Type != discordgo.InteractionApplicationCommand {
-			return
-		}
-		if i.ApplicationCommandData().Name == "say" {
-			text := i.ApplicationCommandData().Options[0].StringValue()
-			// まずはエフェメラルで受付
-			_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-				Type: discordgo.InteractionResponseChannelMessageWithSource,
-				Data: &discordgo.InteractionResponseData{
-					Content: "送るね！",
-					Flags:   discordgo.MessageFlagsEphemeral, // 呼び出し者にだけ見える
-				},
-			})
-			// 実際のチャンネルに投稿（コマンドが来たチャンネルへ）
-			channelID := i.ChannelID
-			if _, err := s.ChannelMessageSend(channelID, text); err != nil {
-				log.Println("send error:", err)
-			}
-		}
-	})
+	// コマンド登録（ファイルを増やしたらここに1行足すだけ）
+	commands.Register(commands.NewSay())
+	commands.Register(commands.NewPing())
+
+	// 共通ディスパッチをハンドラに
+	dg.AddHandler(commands.DispatchInteraction)
+
+	// スラッシュコマンドには Intent は不要だが、将来のために最小限
+	dg.Identify.Intents = 0
 
 	if err := dg.Open(); err != nil {
-		log.Fatal("Open:", err)
+		log.Fatalf("open session: %v", err)
 	}
-	log.Println("Bot started.")
+	defer dg.Close()
 
-	// コマンド登録（ギルドコマンドなら即時反映）
-	registered := make([]*discordgo.ApplicationCommand, 0, len(appCommands))
-	for _, ac := range appCommands {
-		cmd, err := dg.ApplicationCommandCreate(dg.State.User.ID, guildID, ac)
+	// アプリIDはセッションから取得（Client ID と同じ）
+	appID := dg.State.User.ID
+	log.Printf("appID=%s", appID)
+
+	// コマンド作成
+	for _, c := range commands.All() {
+		cmd, err := dg.ApplicationCommandCreate(appID, guildID, c.Def)
 		if err != nil {
-			log.Fatalf("cmd create error: %v", err)
+			log.Fatalf("cannot create command %s: %v", c.Def.Name, err)
 		}
-		registered = append(registered, cmd)
+		log.Printf("created command: %s (%s)", cmd.Name, cmd.ID)
 	}
-	log.Println("Commands registered.")
 
-	// 終了待ち
+	log.Println("Bot is running. Press Ctrl+C to exit.")
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	<-stop
 
-	// クリーンアップ（コマンド削除）
-	for _, cmd := range registered {
-		_ = dg.ApplicationCommandDelete(dg.State.User.ID, guildID, cmd.ID)
-	}
-	_ = dg.Close()
+	// （任意）終了時にコマンド削除したい場合
+	// cmds, _ := dg.ApplicationCommands(appID, guildID)
+	// for _, c := range cmds { _ = dg.ApplicationCommandDelete(appID, guildID, c.ID) }
 }
